@@ -1,4 +1,5 @@
 import os
+import shutil
 import cv2
 import numpy as np
 import rembg
@@ -6,38 +7,59 @@ import rembg
 OUTPUT_RES_X = 1600
 OUTPUT_RES_Y = 1600
 
+# Read image safely
+def read_image(filename):
+    if os.path.exists(filename):
+        image = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
+        return image
+    else:
+        return None
+
 def strip_background(filename, output_path):
-    # Remove the background
-    image = cv2.imread(filename)
+    # Read the image with alpha channel if it exists
+    image = read_image(filename)
     if image is not None:
-        # Convert BGR image to RGBA
-        image_rgba = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+        # Check if the image has 3 channels (BGR)
+        if image.shape[2] == 3:
+            # Convert BGR image to RGB
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # Add alpha channel
+            image_rgba = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2RGBA)
+        elif image.shape[2] == 4:
+            # The image already has an alpha channel
+            image_bgra = image
+            # Convert BGRA to RGBA
+            image_rgba = cv2.cvtColor(image_bgra, cv2.COLOR_BGRA2RGBA)
 
         # Remove the background using rembg
         result = rembg.remove(image_rgba)
 
+        # Convert the result from RGBA to BGRA for OpenCV compatibility
+        result_bgra = cv2.cvtColor(result, cv2.COLOR_RGBA2BGRA)
+
         # Trim the image
-        mask = result[:, :, 3]  # Extract the alpha channel
+        mask = result_bgra[:, :, 3]  # Extract the alpha channel
         coords = cv2.findNonZero(mask)  # Find the coordinates of non-zero pixels
         x, y, w, h = cv2.boundingRect(coords)  # Get the bounding rectangle
-        cropped_image = result[y:y+h, x:x+w]  # Crop the image to the bounding rectangle
+        cropped_image = result_bgra[y:y+h, x:x+w]  # Crop the image to the bounding rectangle
 
-        # Save the cropped image
+        # Save the cropped image as BGRA (OpenCV default)
         cv2.imwrite(output_path, cropped_image)
         return output_path
     else:
         print(f"Image not found at {filename}")
         return None
 
+
 def place_product(stripped, position, size, output_path):
     position = (int(position[0] * OUTPUT_RES_X), int(position[1] * OUTPUT_RES_Y))  # Convert to integer coordinates
     size = (int(size[0] * OUTPUT_RES_X), int(size[1] * OUTPUT_RES_Y))  # Convert to integer size
 
     # Load the stripped image with alpha channel
-    image = cv2.imread(stripped, cv2.IMREAD_UNCHANGED)
+    image = read_image(stripped)
     if image is not None:
         # Load the background image if it exists, otherwise create a blank white background
-        background = cv2.imread(output_path, cv2.IMREAD_UNCHANGED)
+        background = read_image(output_path)
         if background is None:
             # Define output resolution
             background = 255 * np.ones((OUTPUT_RES_Y, OUTPUT_RES_X, 3), np.uint8)
@@ -74,13 +96,18 @@ def place_product(stripped, position, size, output_path):
 if __name__ == "__main__":
     folder_path = os.getcwd()
     output_folder = os.path.join(folder_path, 'Output Images')
+    input_folder = os.path.join(folder_path, 'Input Images')
+    if os.path.exists(output_folder):
+        shutil.rmtree(output_folder)
     os.makedirs(output_folder, exist_ok=True)
 
-    # Get the file paths of all images in the directory and store in an array
-    images = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f)) and (f.endswith('.jpg') or f.endswith('.png'))]
+    # Get the file paths of all images in the input folder and store in an array
+    images = [f for f in os.listdir(input_folder) if os.path.isfile(os.path.join(input_folder, f)) and (f.endswith('.jpg') or f.endswith('.png'))]
 
     # Loop through all images in the directory
     for image in images:
+
+        print(f"Processing {image}...")
 
         # Create a new folder named after the image
         image_folder = os.path.join(output_folder, image.split('.')[0])
@@ -88,62 +115,65 @@ if __name__ == "__main__":
 
         # Remove the background of the image
         stripped_path = os.path.join(image_folder, image.replace('.jpg', '.png').replace('.png', '_stripped.png'))
-        stripped_path = strip_background(os.path.join(folder_path, image), stripped_path)
+        stripped_path = strip_background(os.path.join(input_folder, image), stripped_path)
 
         if stripped_path is None:
             continue
 
         # Get aspect ratio of the image
-        img = cv2.imread(stripped_path)
+        img = read_image(stripped_path)
         ar = img.shape[1] / img.shape[0]
 
         # longest side as ratio of image
         border = 0.025
-        big_size = 1 - 2 * border
-        small_size = 0.8
+        long_size = 1 - 2 * border
 
-        if ar < 1: # Portrait
+        if ar < 0.6: # Portrait
             for num_products in range(2, 7):
                 multi_path = os.path.join(image_folder, image.replace('.jpg', '.png').replace('.png', f"_{num_products}.png"))
                 
-                big_y_size = big_size
-                big_x_size = big_y_size * ar
-                small_y_size = small_size
-                small_x_size = small_y_size * ar
+                y_size = long_size
+                x_size = long_size * ar
 
-                # centre vertically
-                small_y_pos = 0.5 - small_y_size / 2
+                # distribute products vertically
+                x_spacing = (1 - (2 * border) - x_size) / (num_products - 1)
 
-                # distribute small products
-                x_spacing = (1 - (2 * border) - big_x_size) / num_products
+                for i in range(num_products):
+                    x_pos = border + x_spacing * i
+                    place_product(stripped_path, (x_pos, border), (x_size, y_size), multi_path)
 
-                for i in range(num_products - 1):
-                    small_x_pos = 1 - border - x_spacing * i - small_x_size
-                    place_product(stripped_path, (small_x_pos, small_y_pos), (small_x_size, small_y_size), multi_path)
+        elif ar < 1.4: # Square
+            for num_products in range(2, 7):
+                multi_path = os.path.join(image_folder, image.replace('.jpg', '.png').replace('.png', f"_{num_products}.png"))
+                
+                if ar < 1: # tall square
+                    y_size = (1 - 2 * border) / (1 + 0.1 * num_products)
+                    x_size = y_size * ar
 
-                # place big product
-                place_product(stripped_path, (border, border), (big_x_size, big_y_size), multi_path)
+                else: # wide square
+                    x_size = (1 - 2 * border) / (1 + 0.1 * num_products)
+                    y_size = x_size / ar
+
+                x_spacing = (1 - (2 * border) - x_size) / (num_products - 1)
+                y_spacing = (1 - (2 * border) - y_size) / (num_products - 1)
+
+                for i in range(num_products):
+                    x_pos = border + x_spacing * i
+                    y_pos = border + y_spacing * i
+                    place_product(stripped_path, (x_pos, y_pos), (x_size, y_size), multi_path)
 
         else: # Landscape
             for num_products in range(2, 7):
                 multi_path = os.path.join(image_folder, image.replace('.jpg', '.png').replace('.png', f"_{num_products}.png"))
 
-                big_x_size = big_size
-                big_y_size = big_x_size / ar
-                small_x_size = small_size
-                small_y_size = small_x_size / ar
+                x_size = long_size
+                y_size = long_size / ar
 
-                # centre horizontally
-                small_x_pos = 0.5 - small_x_size / 2
+                # distribute products vertically
+                y_spacing = (1 - (2 * border) - y_size) / (num_products - 1)
 
-                # distribute small products
-                y_spacing = (1 - (2 * border) - big_y_size) / num_products
-
-                for i in range(num_products - 1):
-                    small_y_pos = border + y_spacing * i
-                    place_product(stripped_path, (small_x_pos, small_y_pos), (small_x_size, small_y_size), multi_path)
-                    
-                # place big product
-                place_product(stripped_path, (border, 1 - border - big_y_size), (big_x_size, big_y_size), multi_path)
+                for i in range(num_products):
+                    y_pos = border + y_spacing * i
+                    place_product(stripped_path, (border, y_pos), (x_size, y_size), multi_path)
 
     print("Processing complete!")
